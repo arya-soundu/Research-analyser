@@ -2,3 +2,4 @@ streamlit
 pypdf2
 transformers
 torch
+sentencepiece
