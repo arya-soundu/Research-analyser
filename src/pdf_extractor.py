@@ -13,7 +13,7 @@ def extract_text_from_pdf(file_bytes)->str:
     if not full_text.strip():
         return "ERROR: Could not extract any text. PDF may be scanned or image based.."
     return full_text
-    
+
 def get_pdf_metadata(file_bytes)->dict:
     reader=PyPDF2.PdfReader(file_bytes)
     meta=reader.metadata
