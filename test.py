@@ -1,23 +1,10 @@
-import io
-from src.pdf_extractor import extract_text_from_pdf,get_pdf_metadata
-from src.preprocessor import clean_text, chunk_text, get_text_stats
+from src.summarizer import load_summarizer, summarize_chunk
 
-with open(r"C:\Users\sriso\OneDrive\Desktop\CS\Mini Project\LegalTextSummarization_InLegalBERT.pdf","rb") as file:
-    file_bytes=file.read()
-    text=extract_text_from_pdf(io.BytesIO(file_bytes))
-    print("Text:",text[:500])
-    metadata=get_pdf_metadata(io.BytesIO(file_bytes))
-    print("Metadata:",metadata)
+print("\n--- LOADING MODEL ---")
+model = load_summarizer()
+print("Model loaded.")
 
-clean = clean_text(text)
-chunks = chunk_text(clean)
-stats = get_text_stats(clean)
-
-print("--- STATS ---")
-print(stats)
-
-print(f"\n--- NUMBER OF CHUNKS ---")
-print(len(chunks))
-
-print("\n--- FIRST CHUNK PREVIEW ---")
-print(chunks[0][:300])
+print("\n--- SUMMARIZING FIRST CHUNK ---")
+chunks = ["This is a test chunk that we are using to verify if the summarizer is working correctly. " * 10]
+test_summary = summarize_chunk(model, chunks[0])
+print(test_summary)
