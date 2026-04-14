@@ -49,6 +49,7 @@ research-analyzer/
     ├── preprocessor.py     # Clean text + chunk it
     ├── summarizer.py       # HuggingFace BART model
     └── structurer.py       # Build structured notes
+    └── qa_engine.py        # RAG pipeline (Groq API)
 ```
 
 ---

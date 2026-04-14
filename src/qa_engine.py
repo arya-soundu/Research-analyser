@@ -1,6 +1,7 @@
 import streamlit as st
-from sentrnce_transformers import SentenceTransformer, util
-from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util
+from groq import Groq
+import os
 import torch
 
 #Model loaders
@@ -9,11 +10,9 @@ def load_embedding_model():
     # all-MiniLM-L6-v2 is the industry std lightweight embedding model
     # it encodes text into 384 dimensional vectors
     return SentenceTransformer('all-MiniLM-L6-v2')
-@st.cache_resource
-def load_qa_model():
-    # flan-t5-base is a generative model — it WRITES answers
-    # "text2text-generation" means: take text in, produce text out
-    return pipeline('text2text-generation', model='google/flan-t5-base',device=-1)
+# Note: We deleted load_qa_model() completely! 
+# We no longer load a huge conversational model into your laptop's RAM. 
+# Instead, Groq's cloud LPU handles it using their REST API.
 #Semantic Retrieval
 def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3)->list:
     #Step 1:load the embedding model
@@ -33,26 +32,39 @@ def embed_chunks(chunks:list):
     return embed_model.encode(chunks,convert_to_tensor=True)
 
 #ANSWER GENERATION
-def answer_question(question:str,chunks:list,chunk_embeddings)->dict:
-    qa_model=load_qa_model()
-    #Step 1: find semantically relevant chunks
-    relevant_chunks= find_relevant_chunks(question,chunks,chunk_embeddings)
-    #Step 2: build the prompt
-    #flan-t5 needs a clear ins format
-    context=" ".join(relevant_chunks)
-    prompt=f"""Answer the following question based on the provided context.
-If the answer is not in the context, say 'This information is not mentioned in the paper.'
-Context: {context}
-Question: {question}
-Answer:"""
-    # Step 3: generate the answer
-    result = qa_model(
-        prompt,
-        max_new_tokens=200,    # max length of the generated answer
-        do_sample=False        # deterministic output
+def answer_question(question:str, chunks:list, chunk_embeddings, api_key:str)->dict:
+    # Step 1: find semantically relevant chunks (happens locally)
+    relevant_chunks = find_relevant_chunks(question, chunks, chunk_embeddings)
+    context = " ".join(relevant_chunks)
+    
+    # Step 2: Initialize Groq
+    if not api_key:
+        return {
+            "answer": "⚠️ Please enter your Groq API Key in the sidebar to use the Q&A feature.",
+            "context_used": "No API Key provided."
+        }
+        
+    client = Groq(api_key=api_key)
+    
+    # Step 3: Build the system message (instructions) and User message (the task)
+    system_prompt = """You are a helpful research assistant. Answer the user's question in detail using the provided context as your primary source.
+If the context does not contain the answer, you may use your general knowledge, but you MUST start your outside answer with: '[External Knowledge]'."""
+
+    user_payload = f"Context: {context}\n\nQuestion: {question}"
+
+    # Step 4: Stream the payload to Groq's blazing fast LPUs
+    chat_completion = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_payload}
+        ],
+        model="llama-3.1-8b-instant",
     )
-    answer = result[0]["generated_text"].strip()
+    
+    # Step 5: Return the AI's answer
+    answer = chat_completion.choices[0].message.content
+    
     return {
         "answer": answer,
-        "context_used": context[:300] + "..."   # show user which part of paper was used
+        "context_used": context[:300] + "..."   # still showing the user which part of paper was used
     }

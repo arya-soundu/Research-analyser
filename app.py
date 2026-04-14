@@ -1,11 +1,15 @@
 import io
+import os
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from src.pdf_extractor import extract_text_from_pdf, get_pdf_metadata
 from src.preprocessor import clean_text,chunk_text,get_text_stats
 from src.summarizer import load_summarizer,summarize_chunk
 from src.structurer import build_structured_notes
-from src.qa_engine import load_embedding_model, load_qa_model,answer_question,embed_chunks
+from src.qa_engine import load_embedding_model, answer_question, embed_chunks
 #UI - Page Config
 st.set_page_config(
     page_title="Research Paper Analyzer",
@@ -31,17 +35,24 @@ with st.sidebar:
         step=50
     )
     st.markdown("---")
-    st.markdown("**Model:** `facebook/bart-large-cnn`")
-    st.markdown("**Framework:** HuggingFace Transformers")
+    st.markdown("### 🧠 Architecture Stack")
+    st.markdown("- **Summarization**: `bart-large-cnn` (Local)")
+    st.markdown("- **Embeddings**: `all-MiniLM-L6-v2` (Local)")
+    st.markdown("- **Generative Q&A**: `Llama-3.1-8B` (Groq API)")
     st.markdown("---")
 
     # pre-load the model while user reads the UI
-    # @st.cache_resource means this only runs ONCE per session
     with st.spinner("Loading AI models..."):
         model = load_summarizer()
-        load_qa_model()
         load_embedding_model()
-    st.success("✅ All models ready")
+    st.success("✅ Semantic models ready")
+    
+    st.markdown("### 🔑 API Authentication")
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key or api_key == "paste_your_key_here":
+        st.warning("⚠️ Please add your `GROQ_API_KEY` to the hidden `.env` file to enable the Chat feature.")
+    else:
+        st.success("✅ Secure `.env` API Key loaded")
 
 #---File Uploader--
 #returns file object when user uploads, None otherwise
@@ -52,6 +63,11 @@ uploaded_file=st.file_uploader(
 
 #Main Logic
 if uploaded_file:
+    # Important: Reset session state if the user uploads a completely different file!
+    if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file.name:
+        st.session_state.clear()
+        st.session_state.current_file = uploaded_file.name
+
     file_bytes=uploaded_file.getvalue()
     #Step 1 - metadata
     meta=get_pdf_metadata(io.BytesIO(file_bytes))
@@ -61,20 +77,27 @@ if uploaded_file:
     col3.metric("Pages",  meta["pages"])
     st.divider()
 
-    #Step 2 - Extract text
-    with st.spinner("Extracting text..."):
-        raw_text=extract_text_from_pdf(io.BytesIO(file_bytes))
-    #if extarction failed show error and stop
-    if raw_text.startswith("ERROR"):
-        st.error(raw_text)
-        st.stop()
-
-    #Step 3 - Preprocess
-    with st.spinner("Preparing text..."):
-        clean=clean_text(raw_text)
-        chunks=chunk_text(clean,max_words=chunk_size)
-        stats=get_text_stats(clean)
-        st.info(
+    #Step 2 & 3 - Extract & Preprocess
+    if "chunks" not in st.session_state or st.session_state.get("last_chunk_size") != chunk_size:
+        with st.spinner("Extracting and Preparing text..."):
+            raw_text=extract_text_from_pdf(io.BytesIO(file_bytes))
+            if raw_text.startswith("ERROR"):
+                st.error(raw_text)
+                st.stop()
+            
+            clean=clean_text(raw_text)
+            st.session_state.chunks = chunk_text(clean,max_words=chunk_size)
+            st.session_state.stats = get_text_stats(clean)
+            st.session_state.last_chunk_size = chunk_size
+            
+            # If chunks change, blow away old dependencies
+            for key in ["chunk_embeddings", "combined_summary", "structured_notes"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+                    
+    chunks = st.session_state.chunks
+    stats = st.session_state.stats
+    st.info(
         f"📊 **{stats['words_count']:,} words** · "
         f"**{stats['estimated_read_min']} min read** · "
         f"**{len(chunks)} chunks** to process")
@@ -87,22 +110,27 @@ if uploaded_file:
 
     #Step 4 - Summarize
     st.subheader("🤖 Generating Summary")
-    progress=st.progress(0,text="Starting...")
-    summaries=[]
-    for i,chunk in enumerate(chunks):
-        progress.progress(
-            (i + 1) / len(chunks),
-            text=f"Processing chunk {i+1} of {len(chunks)}..."
-        )
-        summaries.append(summarize_chunk(model,chunk))
-    progress.empty() #remove when done
-    combined=" ".join(summaries)
-    # We deliberately skip a "Final compression pass" here because forcing multiple pages 
-    # of detailed summaries into a single 150-word box deletes 90% of the paper's findings!
+    
+    if "combined_summary" not in st.session_state:
+        progress=st.progress(0,text="Starting...")
+        summaries=[]
+        for i,chunk in enumerate(chunks):
+            progress.progress(
+                (i + 1) / len(chunks),
+                text=f"Processing chunk {i+1} of {len(chunks)}..."
+            )
+            summaries.append(summarize_chunk(model,chunk))
+        progress.empty() #remove when done
+        st.session_state.combined_summary = " ".join(summaries)
+        
+    combined = st.session_state.combined_summary
     
     # ── STEP 5: structure and display ─────────────────────────
-    with st.spinner("📂 Structuring notes..."):
-        notes = build_structured_notes(combined)
+    if "structured_notes" not in st.session_state:
+        with st.spinner("📂 Structuring notes..."):
+            st.session_state.structured_notes = build_structured_notes(combined)
+    
+    notes = st.session_state.structured_notes
     st.success("✅ Analysis complete!")
     st.divider()
     # display results in tabs — keeps UI clean
@@ -127,35 +155,33 @@ if uploaded_file:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        # display previous questions and answers
+        # chat input pinned at bottom
+        user_question = st.chat_input("Ask a question about the paper...")
+
+        if user_question:
+            with st.spinner("Thinking..."):
+                result = answer_question(
+                    user_question,
+                    chunks,
+                    st.session_state.chunk_embeddings,
+                    api_key=api_key
+                )
+            
+            # Insert the newest question at the TOP of the stack (index 0)
+            st.session_state.chat_history.insert(0, {
+                "question": user_question,
+                "answer":   result["answer"],
+                "context":  result["context_used"]
+            })
+
+        # Render the stacked history (Newest questions are at the top)
         for item in st.session_state.chat_history:
             with st.chat_message("user"):
                 st.write(item["question"])
             with st.chat_message("assistant"):
                 st.write(item["answer"])
-
-        # chat input pinned at bottom
-        user_question = st.chat_input("Ask a question about the paper...")
-
-        if user_question:
-            with st.chat_message("user"):
-                st.write(user_question)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    result = answer_question(
-                        user_question,
-                        chunks,
-                        st.session_state.chunk_embeddings
-                    )
-                st.write(result["answer"])
                 with st.expander("📄 Context used to answer"):
-                    st.caption(result["context_used"])
-
-            st.session_state.chat_history.append({
-                "question": user_question,
-                "answer":   result["answer"]
-            })
+                    st.caption(item.get("context", "Context unavailable for this query."))
 
 # ── EMPTY STATE ───────────────────────────────────────────────
 # shown when no file uploaded yet
