@@ -3,3 +3,4 @@ pypdf2
 transformers
 torch
 sentencepiece
+sentence-transformers==2.7.0

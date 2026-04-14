@@ -46,21 +46,28 @@ def classify_sentence(sentence:str)->(str):
         for phrase in phrases:
             if phrase in lower:
                 return section   # return immediately, no need to check scores
-    #return the section with the highest score
-    return max(scores,key=scores.get) if max(scores.values()) > 0 else "findings"
+    # return "unknown" if there are no clear signals, instead of defaulting to findings
+    max_score = max(scores.values())
+    return max(scores, key=scores.get) if max_score >= 1 else "unknown"
 
 #Split the summary into induvidual senetnces and then sent it to classify_sentence()
 #Then build a dictionary with the sections as keys and the sentences as values 
 def build_structured_notes(summary:str)->dict:
     sentences = re.split(r'(?<=[.!?]) +',summary.strip())
-    sections = {"objective":[],
-    "methodology":[],
-    "findings":[],
-    "conclusion":[]}
+    sections = {"objective":[], "methodology":[], "findings":[], "conclusion":[]}
+    
+    current_section = "objective" # Start everything assuming it's the objective
+    
     for sentence in sentences:
         if sentence.strip():
-            section=classify_sentence(sentence)
-            sections[section].append(sentence)
+            predicted = classify_sentence(sentence)
+            
+            # If the parser confidently detects a shift, move the context marker
+            if predicted != "unknown":
+                current_section = predicted
+                
+            sections[current_section].append(sentence)
+            
     return {
         k: " ".join(v) if v else f"{k.capitalize()} not clearly identified."
         for k, v in sections.items()
