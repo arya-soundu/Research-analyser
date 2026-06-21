@@ -3,10 +3,8 @@ import re
 def clean_text(raw_text)->str:
     #Fix 1- hyphenated words broken across lines.. \w matches any word characters
     text=re.sub(r'(\w)-\n(\w)',r'\1\2',raw_text)
-    #Fix 2- replace all newlines with a space
-    text=re.sub(r'\n', ' ', text)
-    #Fix 3- collapse multiple spaces into single space
-    text=re.sub(r' +', ' ',text)
+    #Fix 2- replace all newlines and multiple/Unicode whitespace sequences with a single standard space
+    text=re.sub(r'\s+', ' ', text)
     # Fix 4- remove journal header lines like "Vol:.(1234567890)Int J Syst..."
     text = re.sub(r'Vol:\..*?(?=\s)', '', text)
     # Fix 5- remove DOI lines — not useful for summarization

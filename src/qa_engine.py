@@ -14,7 +14,7 @@ def load_embedding_model():
 # We no longer load a huge conversational model into your laptop's RAM. 
 # Instead, Groq's cloud LPU handles it using their REST API.
 #Semantic Retrieval
-def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3)->tuple:
+def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3,original_question:str=None)->tuple:
     #Step 1:load the embedding model
     embed_model=load_embedding_model()
     #Step 2:convert the question into a vector 
@@ -25,21 +25,39 @@ def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3)-
     # Keyword Boosting: detect references to figures, tables, or sections in the question
     # and boost chunks containing matching terms to ensure precise retrieval.
     import re
-    matches = re.findall(r'(figure|fig\.?|table|section)\s*(\d+)', question.lower())
+    # Match various abbreviations (figure, fig, table, tbl, section, sec) followed by a number
+    matches = re.findall(r'(figure|fig\.?|table|tbl\.?|section|sec\.?)\s*(\d+)', question.lower())
+    if original_question:
+        matches += re.findall(r'(figure|fig\.?|table|tbl\.?|section|sec\.?)\s*(\d+)', original_question.lower())
+    matches = list(set(matches))
+    
     for label, num in matches:
         search_terms = []
-        if label.startswith("fig"):
-            search_terms = [f"fig. {num}", f"fig.{num}", f"figure {num}"]
-        elif label == "figure":
-            search_terms = [f"figure {num}", f"fig. {num}", f"fig.{num}"]
-        else:
-            search_terms = [f"{label} {num}"]
+        if label.startswith("fig") or label.startswith("figure"):
+            search_terms = [
+                f"figure {num}", f"figure{num}",
+                f"fig. {num}", f"fig.{num}",
+                f"fig {num}", f"fig{num}"
+            ]
+        elif label.startswith("tab") or label.startswith("tbl"):
+            search_terms = [
+                f"table {num}", f"table{num}",
+                f"tbl. {num}", f"tbl.{num}",
+                f"tbl {num}", f"tbl{num}"
+            ]
+        elif label.startswith("sec") or label.startswith("section"):
+            search_terms = [
+                f"section {num}", f"section{num}",
+                f"sec. {num}", f"sec.{num}",
+                f"sec {num}", f"sec{num}"
+            ]
             
         # Add score boost for matching chunks
         for idx, chunk in enumerate(chunks):
-            chunk_lower = chunk.lower()
-            if any(term in chunk_lower for term in search_terms):
-                scores[idx] += 0.5
+            # Normalize all Unicode whitespace/spacing characters to standard space for robust check
+            chunk_normalized = re.sub(r'\s+', ' ', chunk.lower())
+            if any(term in chunk_normalized for term in search_terms):
+                scores[idx] += 1.0
                 
     #Step 4:get top k chunks with highest scores indices
     top_indices = torch.topk(scores,k=min(top_k, len(chunks))).indices.tolist()
@@ -98,7 +116,7 @@ Standalone Question:"""
             pass # Fallback to original question
 
     # Step 3: Find semantically relevant chunks (happens locally) using reformulated query
-    relevant_chunks, top_indices = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings)
+    relevant_chunks, top_indices = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings, original_question=question)
     context = " ".join(relevant_chunks)
     
     # Map indices to source page numbers and text contents
