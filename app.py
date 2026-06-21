@@ -372,7 +372,24 @@ if file_bytes:
         with tab3:
             st.write(combined)
         with tab4:
-            st.markdown("Ask anything about the paper and the AI will find the answer.")
+            col_chat_header, col_clear_btn = st.columns([3, 1])
+            with col_chat_header:
+                st.markdown("Ask anything about the paper and the AI will find the answer.")
+            with col_clear_btn:
+                if st.button("🧹 Clear Chat", key="clear_chat_history_btn"):
+                    st.session_state.chat_history = []
+                    # Update local cache with cleared history
+                    cache_data = {
+                        "meta": meta,
+                        "chunks": chunks,
+                        "chunk_pages": chunk_pages,
+                        "stats": stats,
+                        "combined_summary": combined,
+                        "structured_notes": notes,
+                        "chat_history": []
+                    }
+                    save_to_cache(pdf_hash, filename, cache_data, file_bytes)
+                    st.rerun()
 
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
