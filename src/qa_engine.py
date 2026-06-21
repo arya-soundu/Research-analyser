@@ -22,6 +22,9 @@ def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3,o
     #Step 3:compute cosine similarity between question vector and chunk vectors 
     scores = util.cos_sim(question_embedding,chunk_embeddings)[0]
     
+    # We get the max raw score before boosting to evaluate document relevance
+    max_raw_score = torch.max(scores).item()
+    
     # Keyword Boosting: detect references to figures, tables, or sections in the question
     # and boost chunks containing matching terms to ensure precise retrieval.
     import re
@@ -61,8 +64,8 @@ def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3,o
                 
     #Step 4:get top k chunks with highest scores indices
     top_indices = torch.topk(scores,k=min(top_k, len(chunks))).indices.tolist()
-    #Step 5:return the actual chunk texts and their indices
-    return [chunks[i] for i in top_indices], top_indices
+    #Step 5:return the actual chunk texts, their indices, and the max raw similarity score
+    return [chunks[i] for i in top_indices], top_indices, max_raw_score
 
 def embed_chunks(chunks:list):
     #pre-compute embeddings for all chunks once paper is uploaded
@@ -116,12 +119,14 @@ Standalone Question:"""
             pass # Fallback to original question
 
     # Step 3: Find semantically relevant chunks (happens locally) using reformulated query
-    relevant_chunks, top_indices = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings, original_question=question)
+    relevant_chunks, top_indices, max_raw_score = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings, original_question=question)
     context = " ".join(relevant_chunks)
+    
+    is_external_only = (max_raw_score < 0.18)
     
     # Map indices to source page numbers and text contents
     retrieved_sources = []
-    if chunk_pages:
+    if chunk_pages and not is_external_only:
         for idx in top_indices:
             if idx < len(chunk_pages):
                 page_num = chunk_pages[idx]
@@ -132,8 +137,17 @@ Standalone Question:"""
                 })
     
     # Step 4: Build the system message (instructions) and messages timeline
-    system_prompt = """You are a helpful research assistant. Answer the user's question in detail using the provided context as your primary source.
-If the context does not contain the answer, you may use your general knowledge, but you MUST start your outside answer with: '[External Knowledge]'."""
+    system_prompt = """You are a helpful research assistant. Answer the user's question in detail.
+Use the provided context as your primary source of truth.
+- If the context does not contain the answer, or if the context is insufficient or irrelevant, you MUST answer the question using your general knowledge (web knowledge).
+- IMPORTANT: If you answer the question using your general/external knowledge (because the context is missing, insufficient, or irrelevant), you MUST prefix your response with the exact tag '[EXTERNAL_KNOWLEDGE]' at the very beginning of your response. Otherwise, do NOT include the tag.
+
+Example response using context:
+Based on the paper, the authors proposed...
+
+Example response using general/external knowledge:
+[EXTERNAL_KNOWLEDGE]
+Based on general knowledge, Python's quicksort can be implemented as..."""
 
     messages = [{"role": "system", "content": system_prompt}]
     
@@ -144,7 +158,12 @@ If the context does not contain the answer, you may use your general knowledge, 
             messages.append({"role": "assistant", "content": turn["answer"]})
             
     # Append the current query with the retrieved context
-    messages.append({"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"})
+    if is_external_only:
+        user_content = f"Question: {question}\n(Note: This question appears to be outside the scope of the document. Please answer using your general/external knowledge and prefix the response with '[EXTERNAL_KNOWLEDGE]'.)"
+    else:
+        user_content = f"Context: {context}\n\nQuestion: {question}"
+        
+    messages.append({"role": "user", "content": user_content})
 
     # Step 5: Stream the payload to Groq's blazing fast LPUs
     chat_completion = client.chat.completions.create(
@@ -155,8 +174,13 @@ If the context does not contain the answer, you may use your general knowledge, 
     # Step 6: Return the AI's answer
     answer = chat_completion.choices[0].message.content
     
+    is_external = is_external_only or ("[EXTERNAL_KNOWLEDGE]" in answer)
+    if "[EXTERNAL_KNOWLEDGE]" in answer:
+        answer = answer.replace("[EXTERNAL_KNOWLEDGE]", "").strip()
+        
     return {
         "answer": answer,
-        "context_used": context[:300] + "...",   # still showing the user which part of paper was used
-        "sources": retrieved_sources
-    }
+        "context_used": "No document context used (General Knowledge)." if is_external else context[:300] + "...",
+        "sources": [] if is_external else retrieved_sources,
+        "is_external": is_external
+    }

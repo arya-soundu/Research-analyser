@@ -413,7 +413,8 @@ if file_bytes:
                     "question": user_question,
                     "answer":   result["answer"],
                     "context":  result["context_used"],
-                    "sources":  result.get("sources", [])
+                    "sources":  result.get("sources", []),
+                    "is_external": result.get("is_external", False)
                 })
                 
                 # Save updated chat history to local cache file
@@ -427,17 +428,21 @@ if file_bytes:
                     "chat_history": st.session_state.chat_history
                 }
                 save_to_cache(pdf_hash, filename, cache_data, file_bytes)
+                st.rerun()
 
             # Render the stacked history (Newest questions are at the top)
             for item_idx, item in enumerate(st.session_state.chat_history):
                 with st.chat_message("user"):
                     st.write(item["question"])
                 with st.chat_message("assistant"):
+                    if item.get("is_external"):
+                        st.warning("🌐 **Answer from External Source:** The uploaded document does not contain this information. The response below is generated using the AI's general knowledge (Groq).")
+                    
                     st.write(item["answer"])
                     
-                    # Render source citations
+                    # Render source citations (only if not external)
                     sources = item.get("sources", [])
-                    if sources:
+                    if sources and not item.get("is_external"):
                         # Extract unique pages (handles both old list of ints and new list of dicts)
                         unique_pages = []
                         seen = set()
