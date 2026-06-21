@@ -22,9 +22,6 @@ def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3,o
     #Step 3:compute cosine similarity between question vector and chunk vectors 
     scores = util.cos_sim(question_embedding,chunk_embeddings)[0]
     
-    # We get the max raw score before boosting to evaluate document relevance
-    max_raw_score = torch.max(scores).item()
-    
     # Keyword Boosting: detect references to figures, tables, or sections in the question
     # and boost chunks containing matching terms to ensure precise retrieval.
     import re
@@ -62,10 +59,13 @@ def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3,o
             if any(term in chunk_normalized for term in search_terms):
                 scores[idx] += 1.0
                 
+    # Calculate the max score after boosting to evaluate document relevance
+    max_boosted_score = torch.max(scores).item()
+    
     #Step 4:get top k chunks with highest scores indices
     top_indices = torch.topk(scores,k=min(top_k, len(chunks))).indices.tolist()
-    #Step 5:return the actual chunk texts, their indices, and the max raw similarity score
-    return [chunks[i] for i in top_indices], top_indices, max_raw_score
+    #Step 5:return the actual chunk texts, their indices, and the max boosted similarity score
+    return [chunks[i] for i in top_indices], top_indices, max_boosted_score
 
 def embed_chunks(chunks:list):
     #pre-compute embeddings for all chunks once paper is uploaded
@@ -119,10 +119,10 @@ Standalone Question:"""
             pass # Fallback to original question
 
     # Step 3: Find semantically relevant chunks (happens locally) using reformulated query
-    relevant_chunks, top_indices, max_raw_score = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings, original_question=question)
+    relevant_chunks, top_indices, max_boosted_score = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings, original_question=question)
     context = " ".join(relevant_chunks)
     
-    is_external_only = (max_raw_score < 0.18)
+    is_external_only = (max_boosted_score < 0.15)
     
     # Map indices to source page numbers and text contents
     retrieved_sources = []
