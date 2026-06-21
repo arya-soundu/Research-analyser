@@ -14,17 +14,38 @@ def load_embedding_model():
 # We no longer load a huge conversational model into your laptop's RAM. 
 # Instead, Groq's cloud LPU handles it using their REST API.
 #Semantic Retrieval
-def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3)->list:
+def find_relevant_chunks(question:str,chunks:list,chunk_embeddings,top_k:int=3)->tuple:
     #Step 1:load the embedding model
     embed_model=load_embedding_model()
     #Step 2:convert the question into a vector 
     question_embedding=embed_model.encode(question,convert_to_tensor=True)
     #Step 3:compute cosine similarity between question vector and chunk vectors 
     scores = util.cos_sim(question_embedding,chunk_embeddings)[0]
+    
+    # Keyword Boosting: detect references to figures, tables, or sections in the question
+    # and boost chunks containing matching terms to ensure precise retrieval.
+    import re
+    matches = re.findall(r'(figure|fig\.?|table|section)\s*(\d+)', question.lower())
+    for label, num in matches:
+        search_terms = []
+        if label.startswith("fig"):
+            search_terms = [f"fig. {num}", f"fig.{num}", f"figure {num}"]
+        elif label == "figure":
+            search_terms = [f"figure {num}", f"fig. {num}", f"fig.{num}"]
+        else:
+            search_terms = [f"{label} {num}"]
+            
+        # Add score boost for matching chunks
+        for idx, chunk in enumerate(chunks):
+            chunk_lower = chunk.lower()
+            if any(term in chunk_lower for term in search_terms):
+                scores[idx] += 0.5
+                
     #Step 4:get top k chunks with highest scores indices
-    top_indices = torch.topk(scores,k=min(top_k, len(chunks))).indices
-    #Step 5:reutrn the actual chunk texts for those indices
-    return [chunks[i] for i in top_indices]
+    top_indices = torch.topk(scores,k=min(top_k, len(chunks))).indices.tolist()
+    #Step 5:return the actual chunk texts and their indices
+    return [chunks[i] for i in top_indices], top_indices
+
 def embed_chunks(chunks:list):
     #pre-compute embeddings for all chunks once paper is uploaded
     #storing means we dont have to recompute every time question is asked 
@@ -32,39 +53,92 @@ def embed_chunks(chunks:list):
     return embed_model.encode(chunks,convert_to_tensor=True)
 
 #ANSWER GENERATION
-def answer_question(question:str, chunks:list, chunk_embeddings, api_key:str)->dict:
-    # Step 1: find semantically relevant chunks (happens locally)
-    relevant_chunks = find_relevant_chunks(question, chunks, chunk_embeddings)
-    context = " ".join(relevant_chunks)
-    
-    # Step 2: Initialize Groq
+def answer_question(question:str, chunks:list, chunk_embeddings, api_key:str, chat_history:list=None, chunk_pages:list=None)->dict:
+    # Step 1: Initialize Groq
     if not api_key:
         return {
             "answer": "⚠️ Please enter your Groq API Key in the sidebar to use the Q&A feature.",
-            "context_used": "No API Key provided."
+            "context_used": "No API Key provided.",
+            "sources": []
         }
         
     client = Groq(api_key=api_key)
     
-    # Step 3: Build the system message (instructions) and User message (the task)
+    # Step 2: Reformulate follow-up question if chat history exists
+    query_for_retrieval = question
+    if chat_history and len(chat_history) > 0:
+        try:
+            history_str = ""
+            for turn in reversed(chat_history[:3]):
+                history_str += f"User: {turn['question']}\nAssistant: {turn['answer']}\n"
+            
+            reformulate_prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone question (for a semantic search vector search).
+If it is already standalone or doesn't refer to previous turns, output it exactly as is.
+Do not include any commentary, prefixes, or quotes. Output ONLY the rephrased question.
+
+History:
+{history_str}
+Follow-up Question: {question}
+Standalone Question:"""
+
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a precise search query generator. Output ONLY the rephrased search query, nothing else."},
+                    {"role": "user", "content": reformulate_prompt}
+                ],
+                model="llama-3.1-8b-instant",
+                max_tokens=60,
+                temperature=0.0
+            )
+            rephrased = chat_completion.choices[0].message.content.strip()
+            rephrased = rephrased.strip('"\'')
+            if rephrased:
+                query_for_retrieval = rephrased
+        except Exception:
+            pass # Fallback to original question
+
+    # Step 3: Find semantically relevant chunks (happens locally) using reformulated query
+    relevant_chunks, top_indices = find_relevant_chunks(query_for_retrieval, chunks, chunk_embeddings)
+    context = " ".join(relevant_chunks)
+    
+    # Map indices to source page numbers and text contents
+    retrieved_sources = []
+    if chunk_pages:
+        for idx in top_indices:
+            if idx < len(chunk_pages):
+                page_num = chunk_pages[idx]
+                chunk_text_content = chunks[idx]
+                retrieved_sources.append({
+                    "page": page_num,
+                    "text": chunk_text_content
+                })
+    
+    # Step 4: Build the system message (instructions) and messages timeline
     system_prompt = """You are a helpful research assistant. Answer the user's question in detail using the provided context as your primary source.
 If the context does not contain the answer, you may use your general knowledge, but you MUST start your outside answer with: '[External Knowledge]'."""
 
-    user_payload = f"Context: {context}\n\nQuestion: {question}"
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Append recent chat history (oldest first)
+    if chat_history:
+        for turn in reversed(chat_history[:3]):
+            messages.append({"role": "user", "content": turn["question"]})
+            messages.append({"role": "assistant", "content": turn["answer"]})
+            
+    # Append the current query with the retrieved context
+    messages.append({"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"})
 
-    # Step 4: Stream the payload to Groq's blazing fast LPUs
+    # Step 5: Stream the payload to Groq's blazing fast LPUs
     chat_completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_payload}
-        ],
+        messages=messages,
         model="llama-3.1-8b-instant",
     )
     
-    # Step 5: Return the AI's answer
+    # Step 6: Return the AI's answer
     answer = chat_completion.choices[0].message.content
     
     return {
         "answer": answer,
-        "context_used": context[:300] + "..."   # still showing the user which part of paper was used
+        "context_used": context[:300] + "...",   # still showing the user which part of paper was used
+        "sources": retrieved_sources
     }
